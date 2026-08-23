@@ -1,67 +1,69 @@
-use std::{str::FromStr};
-use std::env;
-use iroh::{Endpoint, PublicKey, endpoint::presets::{self}, protocol::{ProtocolHandler, Router}};
+use iroh::{
+    Endpoint, PublicKey,
+    endpoint::presets::{self},
+    protocol::Router,
+};
+use simulations::rtp_session_manager::RtpConnectionManager;
+use tokio_util::task::TaskTracker;
+use std::{env, sync::Arc};
+use std::str::FromStr;
 
 static ALPN: &[u8] = b"benchmark";
 
 #[tokio::main]
-async fn main() {
-    let endpoint = Endpoint::bind(presets::N0).await.expect("Failed to create endpoint");
+async fn main() -> anyhow::Result<()> {
+    let endpoint = Endpoint::bind(presets::N0).await?;
     endpoint.online().await;
 
     println!("endpoint: {}", endpoint.id().to_string());
 
+    let connection_manager = Arc::new(RtpConnectionManager::new());
+
     let router = Router::builder(endpoint.clone())
-        .accept(ALPN, Echo)
+        .accept(ALPN, Arc::clone(&connection_manager))
         .spawn();
 
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
-        let remote_endpoint = PublicKey::from_str(&args[1]).expect("Key was invalid");
+        let remote_endpoint = PublicKey::from_str(&args[1])?;
 
-        let conn = endpoint.connect(remote_endpoint, ALPN).await.expect("Failed to connect");
+        let conn = endpoint.connect(remote_endpoint, ALPN).await?;
 
-        let (mut send, mut recv) = conn.open_bi().await.expect("Failed to open connection");
+        let (mut send, mut recv) = conn.open_bi().await?;
 
-        send.write_all(b"Hello, world!").await.expect("Failed to send bytes");
-
-        send.finish().expect("Failed to finish connection");
-
-        let response = recv.read_to_end(1000).await.expect("Failed to read bytes");
-
-        assert_eq!(&response, b"Hello, world!");
-
-        conn.close(0u32.into(), b"bye!");
-
-        endpoint.close().await;
+        todo!("Implement starting a connection")
     }
 
-    tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl-C");
+    let connection_manager = Arc::clone(&connection_manager);
 
-    router.shutdown().await.expect("Failed to shutdown");
+    let send_tasks = TaskTracker::new();
+    send_tasks.spawn(send_packets(connection_manager, send_audio));
+
+    send_tasks.wait().await;
+
+    endpoint.close().await;
+
+    router.shutdown().await?;
+
+    Ok(())
 }
 
-#[derive(Debug)]
-pub struct Echo;
+async fn send_packets(connection_manager: Arc<RtpConnectionManager>, send_handler: impl AsyncFn() -> ())
+{
+    loop {
+        let connections = connection_manager.connections();
 
-impl ProtocolHandler for Echo {
-    async fn accept(
-        &self,
-        connection: iroh::endpoint::Connection,
-    ) -> Result<(), iroh::protocol::AcceptError> {
-        let endpoint_id = connection.remote_id();
-        println!("accepted connection from {endpoint_id}");
+        if connections.is_empty() {
+            continue;
+        }
 
-        let (mut send, mut recv) = connection.accept_bi().await?;
-
-        let bytes_sent = tokio::io::copy(&mut recv, &mut send).await?;
-        println!("Copied over {bytes_sent} byte(s)");
-
-        send.finish()?;
-
-        connection.closed().await;
-
-        Result::Ok(())
+        for _ in connections {
+            send_handler().await;
+        }
     }
+}
+
+async fn send_audio () {
+    todo!()
 }

@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.104"
 bytes = "1.12.1"
 iroh = "1.0.3"
 tokio = { version = "1.53.1", features = ["signal", "macros"]}
+serde_json = "1.0.149"
+serde = { version = "1.0.228", features = ["derive"] }
+dashmap = "6.2.1"
+tokio-util = "0.7.19"
+rand = "0.10.2"
