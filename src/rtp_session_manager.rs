@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 use dashmap::DashMap;
 use iroh::{
@@ -10,12 +8,12 @@ use iroh::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::rtp_packet_header::RTPHeader;
+use crate::{rtp_packet_header::RTPHeader, rtp_receiver::packet_receiver};
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct SessionInfo {
+struct SessionInfo {
     peers: Vec<String>,
     video_ssrc: u32,
     audio_ssrc: u32,
@@ -40,11 +38,16 @@ impl RtpConnectionManager {
             rng.next_u32()
         };
 
-        Self { connections: DashMap::new(), audio_ssrc, video_ssrc }
+        Self {
+            connections: DashMap::new(),
+            audio_ssrc,
+            video_ssrc,
+        }
     }
 
     pub fn connections(&self) -> Vec<Connection> {
-        let connections: Vec<Connection> = self.connections.iter().map(|conn| conn.clone()).collect();
+        let connections: Vec<Connection> =
+            self.connections.iter().map(|conn| conn.clone()).collect();
         connections
     }
 
@@ -57,7 +60,7 @@ impl RtpConnectionManager {
 
         SessionInfo {
             peers,
-            video_ssrc: self.video_ssrc,
+            video_ssrc: self.audio_ssrc,
             audio_ssrc: self.video_ssrc,
         }
     }
@@ -75,10 +78,8 @@ impl ProtocolHandler for RtpConnectionManager {
         let request: SessionInfo =
             serde_json::from_slice(&bytes).map_err(|e| AcceptError::from_err(e))?;
 
-        self.connections.insert(
-            connection.remote_id(),
-            connection.clone()
-        );
+        self.connections
+            .insert(connection.remote_id(), connection.clone());
 
         let response = self.session_info();
         let response = serde_json::to_vec(&response).map_err(|e| AcceptError::from_err(e))?;
@@ -91,16 +92,19 @@ impl ProtocolHandler for RtpConnectionManager {
         let recv_tasks = TaskTracker::new();
         let (audio_tx, audio_rx) = mpsc::channel::<(RTPHeader, Bytes)>(200);
         let (frame_tx, frame_rx) = mpsc::channel::<(RTPHeader, Bytes)>(200);
+        let token = CancellationToken::new();
 
-        todo!("Implement receiver tasks");
-        
+        recv_tasks.spawn(packet_receiver(audio_rx, token.child_token(), || todo!()));
+        recv_tasks.spawn(packet_receiver(frame_rx, token.child_token(), || todo!()));
+
         loop {
             let mut packet = match connection.read_datagram().await {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("Connection Error: {e}");
-                    break
-                },
+                    token.cancel();
+                    break;
+                }
             };
 
             if packet[1] & 0x7F >= 72 {
@@ -108,7 +112,11 @@ impl ProtocolHandler for RtpConnectionManager {
             } else {
                 let header = RTPHeader::deserialize(&mut packet);
 
-                let tx = if header.ssrc == request.audio_ssrc { &audio_tx } else { &frame_tx };
+                let tx = if header.ssrc == request.audio_ssrc {
+                    &audio_tx
+                } else {
+                    &frame_tx
+                };
 
                 let _ = tx
                     .send((header, packet))
@@ -116,7 +124,7 @@ impl ProtocolHandler for RtpConnectionManager {
                     .inspect_err(|e| eprintln!("RTP receiver was full: {e}"));
             }
         }
-        
+
         self.connections.remove(&connection.remote_id());
 
         recv_tasks.wait().await;
@@ -124,5 +132,3 @@ impl ProtocolHandler for RtpConnectionManager {
         Ok(())
     }
 }
-
-

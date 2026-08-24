@@ -1,5 +1,11 @@
 use std::{collections::VecDeque, time::Instant};
 
+use bytes::Bytes;
+use tokio::sync::mpsc::Receiver;
+use tokio_util::sync::CancellationToken;
+
+use crate::rtp_packet_header::RTPHeader;
+
 #[derive(Debug)]
 pub struct Peer {
     ///  variance in arrival time
@@ -35,9 +41,25 @@ pub struct Peer {
 
     /// the received number of packets when the last SR was sent
     received_prior: u32,
-
     // skew_calculator: PeerDelay,
 
     // buffer where frames with the same timestamp are grouped together
     // playout_buffer: Vec<PlayoutBufferNode>,
+}
+
+pub async fn packet_receiver(
+    mut rx: Receiver<(RTPHeader, Bytes)>,
+    cancellation_token: CancellationToken,
+    packet_handler: impl Fn() -> (),
+) {
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                return
+            }
+            Some((header, bytes)) = rx.recv() => {
+                packet_handler()
+            }
+        }
+    }
 }
