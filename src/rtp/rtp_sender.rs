@@ -4,17 +4,16 @@ use bytes::{BufMut, Bytes, BytesMut};
 use iroh::endpoint::Connection;
 use tokio::sync::mpsc::Receiver;
 
-use crate::{rtp_packet_header::RTPSession, rtp_session_manager::RtpConnectionManager};
+use crate::rtp_connection_manager::RtpConnectionManager;
 
 pub enum PacketType {
     Video,
-    Audio
+    Audio,
 }
 
 pub async fn send_packets(
     connection_manager: Arc<RtpConnectionManager>,
     mut rx: Receiver<(Bytes, u32)>,
-    rtp_session: RTPSession,
     packet_type: PacketType,
 ) {
     while let Some((bytes, timestamp)) = rx.recv().await {
@@ -24,9 +23,20 @@ pub async fn send_packets(
             continue;
         }
 
-        match packet_type {
-            PacketType::Video => send_video(&bytes, &connections, &rtp_session, timestamp).await,
-            PacketType::Audio => send_audio(&bytes, &connections, &rtp_session, timestamp).await
+        let payloads = match packet_type {
+            PacketType::Video => split_payload(&bytes, &connection_manager, timestamp),
+            PacketType::Audio => vec![bytes],
+        };
+
+        for payload in payloads {
+            for connection in connection_manager.connections() {
+                match connection.send_datagram_wait(payload.clone()).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("Failed to send to {}: {}", connection.remote_id(), e);
+                    }
+                }
+            }
         }
     }
 }
@@ -34,33 +44,17 @@ pub async fn send_packets(
 pub async fn send_audio(
     bytes: &Bytes,
     connections: &Vec<Connection>,
-    rtp_session: &RTPSession,
+    rtp_session: &RtpConnectionManager,
     timestamp: u32,
 ) {
     todo!()
 }
 
-pub async fn send_video(
+fn split_payload(
     bytes: &Bytes,
-    connections: &Vec<Connection>,
-    rtp_session: &RTPSession,
+    connection_manager: &Arc<RtpConnectionManager>,
     timestamp: u32,
-) {
-    let payloads = split_payload(bytes, rtp_session, timestamp);
-
-    for payload in payloads {
-        for connection in connections {
-            match connection.send_datagram_wait(payload.clone()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("Failed to send to {}: {}", connection.remote_id(), e);
-                }
-            }
-        }
-    }
-}
-
-fn split_payload(bytes: &Bytes, rtp_session: &RTPSession, timestamp: u32) -> Vec<Bytes> {
+) -> Vec<Bytes> {
     let mut payloads: Vec<Bytes> = Vec::new();
 
     let max_fragment_size = 1100; // low key a magic number...
@@ -74,7 +68,12 @@ fn split_payload(bytes: &Bytes, rtp_session: &RTPSession, timestamp: u32) -> Vec
     let mut buf = BytesMut::with_capacity(1500);
 
     if bytes.len() <= max_fragment_size {
-        let rtp_header = rtp_session.get_packet(true, timestamp, bytes.len() as u32);
+        let rtp_header = connection_manager.get_packet_header(
+            true,
+            timestamp,
+            bytes.len() as u32,
+            PacketType::Video,
+        );
 
         rtp_header.serialize(&mut buf);
         //println!("Header (small packet): {}, {}, {}, {}", rtp_header.sequence_number, rtp_header.timestamp, rtp_header.marker, rtp_header.payload_type);
@@ -86,10 +85,11 @@ fn split_payload(bytes: &Bytes, rtp_session: &RTPSession, timestamp: u32) -> Vec
         while nalu_data_remaining > 0 {
             let current_fragment_size = std::cmp::min(max_fragment_size, nalu_data_remaining);
 
-            let rtp_header = rtp_session.get_packet(
+            let rtp_header = connection_manager.get_packet_header(
                 max_fragment_size >= nalu_data_remaining, // VERY last one
                 timestamp,
                 current_fragment_size as u32 + 2,
+                PacketType::Video
             );
 
             rtp_header.serialize(&mut buf); // this will move the sequence number by 1

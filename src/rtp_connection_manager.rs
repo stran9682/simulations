@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use dashmap::DashMap;
 use iroh::{
@@ -10,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{rtp_packet_header::RTPHeader, rtp_receiver::packet_receiver};
+use crate::rtp::{
+    rtp_packet_header::{RTPHeader, RTPSession},
+    rtp_receiver::packet_receiver,
+    rtp_sender::PacketType,
+};
 
 #[derive(Deserialize, Serialize, Debug)]
 struct SessionInfo {
@@ -24,6 +30,8 @@ pub struct RtpConnectionManager {
     connections: DashMap<PublicKey, Connection>,
     audio_ssrc: u32,
     video_ssrc: u32,
+    video_rtp_session: Arc<RTPSession>,
+    audio_rtp_session: Arc<RTPSession>,
 }
 
 impl RtpConnectionManager {
@@ -50,6 +58,8 @@ impl RtpConnectionManager {
             connections: DashMap::new(),
             audio_ssrc,
             video_ssrc,
+            audio_rtp_session: Arc::new(RTPSession::new(audio_ssrc)),
+            video_rtp_session: Arc::new(RTPSession::new(video_ssrc)),
         }
     }
 
@@ -70,6 +80,25 @@ impl RtpConnectionManager {
             peers,
             video_ssrc: self.audio_ssrc,
             audio_ssrc: self.video_ssrc,
+        }
+    }
+
+    pub fn get_packet_header(
+        &self,
+        marker: bool,
+        timestamp: u32,
+        packet_length: u32,
+        packet_type: PacketType,
+    ) -> RTPHeader {
+        match packet_type {
+            PacketType::Video => {
+                self.video_rtp_session
+                    .get_packet(marker, timestamp, packet_length)
+            }
+            PacketType::Audio => {
+                self.audio_rtp_session
+                    .get_packet(marker, timestamp, packet_length)
+            }
         }
     }
 }
@@ -102,8 +131,20 @@ impl ProtocolHandler for RtpConnectionManager {
         let (frame_tx, frame_rx) = mpsc::channel::<(RTPHeader, Bytes)>(200);
         let token = CancellationToken::new();
 
-        recv_tasks.spawn(packet_receiver(audio_rx, token.child_token(), || todo!()));
-        recv_tasks.spawn(packet_receiver(frame_rx, token.child_token(), || todo!()));
+        recv_tasks.spawn(packet_receiver(
+            audio_rx,
+            PacketType::Audio,
+            token.child_token(),
+        ));
+        recv_tasks.spawn(packet_receiver(
+            frame_rx,
+            PacketType::Video,
+            token.child_token(),
+        ));
+        recv_tasks.spawn(async move {
+            todo!("Implement RTCP Receiver")
+        });
+
 
         loop {
             let mut packet = match connection.read_datagram().await {

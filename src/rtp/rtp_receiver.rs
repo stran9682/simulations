@@ -1,10 +1,8 @@
-use std::{collections::VecDeque, time::Instant};
-
+use crate::rtp::{rtp_packet_header::RTPHeader, rtp_sender::PacketType};
 use bytes::Bytes;
+use std::{collections::VecDeque, time::Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
-
-use crate::rtp_packet_header::RTPHeader;
 
 #[derive(Debug)]
 pub struct Peer {
@@ -49,17 +47,31 @@ pub struct Peer {
 
 pub async fn packet_receiver(
     mut rx: Receiver<(RTPHeader, Bytes)>,
+    packet_type: PacketType,
     cancellation_token: CancellationToken,
-    packet_handler: impl Fn() -> (),
 ) {
+    let instant = Instant::now();
+
+    let media_clock_rate = match packet_type {
+        PacketType::Audio => 48_000,
+        PacketType::Video => 90_000,
+    };
+
     loop {
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 return
             }
             Some((header, bytes)) = rx.recv() => {
-                packet_handler()
+                let arrival_time = instant.elapsed();
+                let arrival_time = arrival_time.as_millis() as u32 * (media_clock_rate / 1000);
+                let difference = arrival_time.wrapping_sub(header.timestamp);
+
+                let offset = peer_manager.peer_get_min_window(header.ssrc, difference, stream_type)?;
+
             }
         }
     }
 }
+
+fn calculate_playout_time() {}

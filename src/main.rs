@@ -5,9 +5,8 @@ use iroh::{
     protocol::Router,
 };
 use simulations::{
-    rtp_packet_header::RTPSession,
-    rtp_sender::{PacketType, send_packets},
-    rtp_session_manager::RtpConnectionManager,
+    rtp::{rtp_packet_header::RTPSession, rtp_receiver::Peer, rtp_sender::{PacketType, send_packets}},
+    rtp_connection_manager::RtpConnectionManager,
 };
 
 use std::{env, sync::Arc, time::Instant};
@@ -46,46 +45,42 @@ async fn main() -> anyhow::Result<()> {
         todo!("Implement starting a connection")
     }
 
-    let manager = Arc::clone(&connection_manager);
-
     let send_tasks = TaskTracker::new();
     let clock = Instant::now();
 
+    // Audio
     let (audio_tx, audio_rx) = mpsc::channel::<(Bytes, u32)>(200);
-    let rtp_audio_session = RTPSession::new(connection_manager.audio_ssrc());
     let token = CancellationToken::new();
     let sender_token = token.child_token();
+    let manager = Arc::clone(&connection_manager);
 
     send_tasks.spawn(async move {
+        todo!("add a RTCP task");
         tokio::select! {
-            _ = send_packets(manager, audio_rx, rtp_audio_session, PacketType::Audio) => (),
             _ = sender_token.cancelled() => { return; }
+            _ = send_packets(manager, audio_rx, PacketType::Audio) => (),
         }
     });
 
     send_tasks.spawn(async move {
         generate_audio_sample(audio_tx, clock).await.ok();
-
         token.cancel();
     });
 
-
+    // Video
     let (frame_tx, frame_rx) = mpsc::channel::<(Bytes, u32)>(200);
-    let rtp_video_session = RTPSession::new(connection_manager.video_ssrc());
     let token = CancellationToken::new();
     let sender_token = token.child_token();
 
     send_tasks.spawn(async move {
+        todo!("add a RTCP task");
         tokio::select! {
-            _ = sender_token.cancelled() => {
-                return
-            }
-            _ = send_packets(connection_manager, frame_rx, rtp_video_session, PacketType::Video) => ()
+            _ = sender_token.cancelled() => { return; }
+            _ = send_packets(connection_manager, frame_rx, PacketType::Video) => ()
         }
     });
     send_tasks.spawn(async move {
         generate_video_frame(frame_tx, clock).await.ok();
-
         token.cancel();
     });
 
@@ -111,11 +106,14 @@ async fn generate_video_frame(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyho
         let mut buffer = vec![0; nal_unit_length];
         let bytes_read = file.read_buf(&mut buffer).await?;
 
-        if bytes_read == 0 { return Ok(()) }
+        if bytes_read == 0 {
+            return Ok(());
+        }
 
         let elapsed = (clock.elapsed().as_secs() * 90_000) as u32;
 
-        tx.send((Bytes::copy_from_slice(&buffer[..bytes_read]), elapsed)).await?;
+        tx.send((Bytes::copy_from_slice(&buffer[..bytes_read]), elapsed))
+            .await?;
 
         tokio::time::sleep(Duration::from_secs_f32(1.0 / 30.0)).await;
     }

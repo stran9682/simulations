@@ -109,6 +109,7 @@ impl RTPHeader {
     }
 }
 
+#[derive(Debug)]
 pub struct RTPSession {
     current_sequence_num: AtomicU16,
     packets_generated: AtomicU32,
@@ -144,4 +145,14 @@ impl RTPSession {
             // csrc:
         }
     }
+
+    pub fn get_num_packets_generated(&self) -> u32 {
+        self.packets_generated.load(Ordering::Relaxed)
+    }
+
+    pub fn get_num_octets_sent(&self) -> u32 {
+        self.octets_sent.load(Ordering::Relaxed)
+    }
+
+    pub fn get_peer_min_window(&self) {}
 }
