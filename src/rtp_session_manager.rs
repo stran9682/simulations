@@ -27,6 +27,14 @@ pub struct RtpConnectionManager {
 }
 
 impl RtpConnectionManager {
+    pub fn audio_ssrc(&self) -> u32 {
+        self.audio_ssrc
+    }
+
+    pub fn video_ssrc(&self) -> u32 {
+        self.video_ssrc
+    }
+
     pub fn new() -> Self {
         let video_ssrc = {
             let mut rng = rand::rng();

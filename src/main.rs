@@ -1,24 +1,23 @@
 use bytes::Bytes;
 use iroh::{
     Endpoint, PublicKey,
-    endpoint::{
-        Connection,
-        presets::{self},
-    },
+    endpoint::presets::{self},
     protocol::Router,
 };
 use simulations::{
-    rtp_sender::{send_audio, send_video},
+    rtp_packet_header::RTPSession,
+    rtp_sender::{PacketType, send_packets},
     rtp_session_manager::RtpConnectionManager,
 };
-use std::{env, sync::Arc};
+
+use std::{env, sync::Arc, time::Instant};
 use std::{str::FromStr, time::Duration};
 use tokio::{
     fs::File,
     io::AsyncReadExt,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Sender},
 };
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 static ALPN: &[u8] = b"benchmark";
 
@@ -50,13 +49,45 @@ async fn main() -> anyhow::Result<()> {
     let manager = Arc::clone(&connection_manager);
 
     let send_tasks = TaskTracker::new();
+    let clock = Instant::now();
 
-    let (audio_tx, audio_rx) = mpsc::channel::<Bytes>(200);
-    send_tasks.spawn(send_packets(manager, audio_rx, send_audio));
+    let (audio_tx, audio_rx) = mpsc::channel::<(Bytes, u32)>(200);
+    let rtp_audio_session = RTPSession::new(connection_manager.audio_ssrc());
+    let token = CancellationToken::new();
+    let sender_token = token.child_token();
 
-    let (frame_tx, frame_rx) = mpsc::channel::<Bytes>(200);
-    send_tasks.spawn(generate_video_frame(frame_tx));
-    send_tasks.spawn(send_packets(connection_manager, frame_rx, send_video));
+    send_tasks.spawn(async move {
+        tokio::select! {
+            _ = send_packets(manager, audio_rx, rtp_audio_session, PacketType::Audio) => (),
+            _ = sender_token.cancelled() => { return; }
+        }
+    });
+
+    send_tasks.spawn(async move {
+        generate_audio_sample(audio_tx, clock).await.ok();
+
+        token.cancel();
+    });
+
+
+    let (frame_tx, frame_rx) = mpsc::channel::<(Bytes, u32)>(200);
+    let rtp_video_session = RTPSession::new(connection_manager.video_ssrc());
+    let token = CancellationToken::new();
+    let sender_token = token.child_token();
+
+    send_tasks.spawn(async move {
+        tokio::select! {
+            _ = sender_token.cancelled() => {
+                return
+            }
+            _ = send_packets(connection_manager, frame_rx, rtp_video_session, PacketType::Video) => ()
+        }
+    });
+    send_tasks.spawn(async move {
+        generate_video_frame(frame_tx, clock).await.ok();
+
+        token.cancel();
+    });
 
     send_tasks.wait().await;
 
@@ -67,23 +98,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn send_packets(
-    connection_manager: Arc<RtpConnectionManager>,
-    mut rx: Receiver<Bytes>,
-    send_handler: impl AsyncFn(&Bytes, Vec<Connection>) -> (),
-) {
-    while let Some(bytes) = rx.recv().await {
-        let connections = connection_manager.connections();
-
-        if connections.is_empty() {
-            continue;
-        }
-
-        send_handler(&bytes, connections).await;
-    }
-}
-
-async fn generate_video_frame(tx: Sender<Bytes>) -> anyhow::Result<()> {
+async fn generate_video_frame(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyhow::Result<()> {
     let mut file = File::open("output.h264").await?;
 
     loop {
@@ -94,10 +109,18 @@ async fn generate_video_frame(tx: Sender<Bytes>) -> anyhow::Result<()> {
         let nal_unit_length = u32::from_be_bytes(avcc_start_code) as usize;
 
         let mut buffer = vec![0; nal_unit_length];
-        file.read_buf(&mut buffer).await?;
+        let bytes_read = file.read_buf(&mut buffer).await?;
 
-        tx.send(Bytes::from(buffer)).await?;
+        if bytes_read == 0 { return Ok(()) }
+
+        let elapsed = (clock.elapsed().as_secs() * 90_000) as u32;
+
+        tx.send((Bytes::copy_from_slice(&buffer[..bytes_read]), elapsed)).await?;
 
         tokio::time::sleep(Duration::from_secs_f32(1.0 / 30.0)).await;
     }
+}
+
+async fn generate_audio_sample(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyhow::Result<()> {
+    todo!();
 }

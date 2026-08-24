@@ -1,12 +1,52 @@
+use std::sync::Arc;
+
 use bytes::{BufMut, Bytes, BytesMut};
 use iroh::endpoint::Connection;
+use tokio::sync::mpsc::Receiver;
 
-pub async fn send_audio(bytes: &Bytes, connections: Vec<Connection>) {
+use crate::{rtp_packet_header::RTPSession, rtp_session_manager::RtpConnectionManager};
+
+pub enum PacketType {
+    Video,
+    Audio
+}
+
+pub async fn send_packets(
+    connection_manager: Arc<RtpConnectionManager>,
+    mut rx: Receiver<(Bytes, u32)>,
+    rtp_session: RTPSession,
+    packet_type: PacketType,
+) {
+    while let Some((bytes, timestamp)) = rx.recv().await {
+        let connections = connection_manager.connections();
+
+        if connections.is_empty() {
+            continue;
+        }
+
+        match packet_type {
+            PacketType::Video => send_video(&bytes, &connections, &rtp_session, timestamp).await,
+            PacketType::Audio => send_audio(&bytes, &connections, &rtp_session, timestamp).await
+        }
+    }
+}
+
+pub async fn send_audio(
+    bytes: &Bytes,
+    connections: &Vec<Connection>,
+    rtp_session: &RTPSession,
+    timestamp: u32,
+) {
     todo!()
 }
 
-pub async fn send_video(bytes: &Bytes, connections: &Vec<Connection>) {
-    let payloads = split_payload(bytes);
+pub async fn send_video(
+    bytes: &Bytes,
+    connections: &Vec<Connection>,
+    rtp_session: &RTPSession,
+    timestamp: u32,
+) {
+    let payloads = split_payload(bytes, rtp_session, timestamp);
 
     for payload in payloads {
         for connection in connections {
@@ -20,7 +60,7 @@ pub async fn send_video(bytes: &Bytes, connections: &Vec<Connection>) {
     }
 }
 
-fn split_payload(bytes: &Bytes) -> Vec<Bytes> {
+fn split_payload(bytes: &Bytes, rtp_session: &RTPSession, timestamp: u32) -> Vec<Bytes> {
     let mut payloads: Vec<Bytes> = Vec::new();
 
     let max_fragment_size = 1100; // low key a magic number...
@@ -34,7 +74,7 @@ fn split_payload(bytes: &Bytes) -> Vec<Bytes> {
     let mut buf = BytesMut::with_capacity(1500);
 
     if bytes.len() <= max_fragment_size {
-        let rtp_header = rtp_session.get_packet(is_last_unit, timestamp, payload.len() as u32);
+        let rtp_header = rtp_session.get_packet(true, timestamp, bytes.len() as u32);
 
         rtp_header.serialize(&mut buf);
         //println!("Header (small packet): {}, {}, {}, {}", rtp_header.sequence_number, rtp_header.timestamp, rtp_header.marker, rtp_header.payload_type);
@@ -47,7 +87,7 @@ fn split_payload(bytes: &Bytes) -> Vec<Bytes> {
             let current_fragment_size = std::cmp::min(max_fragment_size, nalu_data_remaining);
 
             let rtp_header = rtp_session.get_packet(
-                is_last_unit && max_fragment_size >= nalu_data_remaining, // VERY last one
+                max_fragment_size >= nalu_data_remaining, // VERY last one
                 timestamp,
                 current_fragment_size as u32 + 2,
             );
