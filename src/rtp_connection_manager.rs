@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::{Arc, Mutex}, time::Instant};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -14,7 +14,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::rtp::{
     rtp_packet_header::{RTPHeader, RTPSession},
-    rtp_receiver::packet_receiver,
+    rtp_receiver::{Peer, packet_receiver},
     rtp_sender::PacketType,
 };
 
@@ -32,6 +32,7 @@ pub struct RtpConnectionManager {
     video_ssrc: u32,
     video_rtp_session: Arc<RTPSession>,
     audio_rtp_session: Arc<RTPSession>,
+    pub clock: Instant
 }
 
 impl RtpConnectionManager {
@@ -60,6 +61,7 @@ impl RtpConnectionManager {
             video_ssrc,
             audio_rtp_session: Arc::new(RTPSession::new(audio_ssrc)),
             video_rtp_session: Arc::new(RTPSession::new(video_ssrc)),
+            clock: Instant::now()
         }
     }
 
@@ -131,20 +133,21 @@ impl ProtocolHandler for RtpConnectionManager {
         let (frame_tx, frame_rx) = mpsc::channel::<(RTPHeader, Bytes)>(200);
         let token = CancellationToken::new();
 
+        let audio_peer = Arc::new(Mutex::new(Peer::new(request.audio_ssrc)));
         recv_tasks.spawn(packet_receiver(
             audio_rx,
             PacketType::Audio,
             token.child_token(),
+            Arc::clone(&audio_peer),
         ));
+
+        let video_peer = Arc::new(Mutex::new(Peer::new(request.video_ssrc)));
         recv_tasks.spawn(packet_receiver(
             frame_rx,
             PacketType::Video,
             token.child_token(),
+            Arc::clone(&video_peer),
         ));
-        recv_tasks.spawn(async move {
-            todo!("Implement RTCP Receiver")
-        });
-
 
         loop {
             let mut packet = match connection.read_datagram().await {

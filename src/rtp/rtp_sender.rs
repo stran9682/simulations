@@ -6,6 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::rtp_connection_manager::RtpConnectionManager;
 
+#[derive(Clone, Copy)]
 pub enum PacketType {
     Video,
     Audio,
@@ -89,7 +90,7 @@ fn split_payload(
                 max_fragment_size >= nalu_data_remaining, // VERY last one
                 timestamp,
                 current_fragment_size as u32 + 2,
-                PacketType::Video
+                PacketType::Video,
             );
 
             rtp_header.serialize(&mut buf); // this will move the sequence number by 1

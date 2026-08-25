@@ -5,7 +5,7 @@ use iroh::{
     protocol::Router,
 };
 use simulations::{
-    rtp::{rtp_packet_header::RTPSession, rtp_receiver::Peer, rtp_sender::{PacketType, send_packets}},
+    rtp::rtp_sender::{PacketType, send_packets},
     rtp_connection_manager::RtpConnectionManager,
 };
 
@@ -46,43 +46,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let send_tasks = TaskTracker::new();
-    let clock = Instant::now();
 
     // Audio
-    let (audio_tx, audio_rx) = mpsc::channel::<(Bytes, u32)>(200);
-    let token = CancellationToken::new();
-    let sender_token = token.child_token();
     let manager = Arc::clone(&connection_manager);
-
-    send_tasks.spawn(async move {
-        todo!("add a RTCP task");
-        tokio::select! {
-            _ = sender_token.cancelled() => { return; }
-            _ = send_packets(manager, audio_rx, PacketType::Audio) => (),
-        }
-    });
-
-    send_tasks.spawn(async move {
-        generate_audio_sample(audio_tx, clock).await.ok();
-        token.cancel();
-    });
+    start_send_tasks(&send_tasks, manager, PacketType::Audio);
 
     // Video
-    let (frame_tx, frame_rx) = mpsc::channel::<(Bytes, u32)>(200);
-    let token = CancellationToken::new();
-    let sender_token = token.child_token();
-
-    send_tasks.spawn(async move {
-        todo!("add a RTCP task");
-        tokio::select! {
-            _ = sender_token.cancelled() => { return; }
-            _ = send_packets(connection_manager, frame_rx, PacketType::Video) => ()
-        }
-    });
-    send_tasks.spawn(async move {
-        generate_video_frame(frame_tx, clock).await.ok();
-        token.cancel();
-    });
+    start_send_tasks(&send_tasks, connection_manager, PacketType::Video);
 
     send_tasks.wait().await;
 
@@ -121,4 +91,30 @@ async fn generate_video_frame(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyho
 
 async fn generate_audio_sample(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyhow::Result<()> {
     todo!();
+}
+
+fn start_send_tasks(
+    send_task_tracker: &TaskTracker,
+    connection_manager: Arc<RtpConnectionManager>,
+    packet_type: PacketType,
+) {
+    let (tx, rx) = mpsc::channel::<(Bytes, u32)>(200);
+    let token = CancellationToken::new();
+    let sender_token = token.child_token();
+    let clock = connection_manager.clock;
+
+    send_task_tracker.spawn(async move {
+        tokio::select! {
+            _ = sender_token.cancelled() => { return; }
+            _ = send_packets(connection_manager, rx, packet_type) => (),
+        }
+    });
+
+    send_task_tracker.spawn(async move {
+        let _ = match packet_type {
+            PacketType::Audio => generate_audio_sample(tx, clock).await.ok(),
+            PacketType::Video => generate_video_frame(tx, clock).await.ok(),
+        };
+        token.cancel();
+    });
 }
