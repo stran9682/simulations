@@ -6,7 +6,7 @@ use iroh::{
 };
 use simulations::{
     rtp::rtp_sender::{PacketType, send_packets},
-    rtp_connection_manager::RtpConnectionManager,
+    rtp_connection_manager::{RtpConnectionManager, SessionInfo},
 };
 
 use std::{env, sync::Arc, time::Instant};
@@ -35,16 +35,6 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = env::args().collect();
 
-    if args.len() > 1 {
-        let remote_endpoint = PublicKey::from_str(&args[1])?;
-
-        let conn = endpoint.connect(remote_endpoint, ALPN).await?;
-
-        let (mut send, mut recv) = conn.open_bi().await?;
-
-        todo!("Implement starting a connection")
-    }
-
     let send_tasks = TaskTracker::new();
 
     // Audio
@@ -52,7 +42,16 @@ async fn main() -> anyhow::Result<()> {
     start_send_tasks(&send_tasks, manager, PacketType::Audio);
 
     // Video
-    start_send_tasks(&send_tasks, connection_manager, PacketType::Video);
+    let manager = Arc::clone(&connection_manager);
+    start_send_tasks(&send_tasks, manager, PacketType::Video);
+
+    if args.len() > 1 {
+        let peers = connect(&endpoint, &args[1], &connection_manager).await?;
+
+        for peer in peers {
+            connect(&endpoint, &peer, &connection_manager).await?;
+        }
+    }
 
     send_tasks.wait().await;
 
@@ -64,28 +63,32 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn generate_video_frame(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyhow::Result<()> {
-    let mut file = File::open("output.h264").await?;
-
     loop {
-        let mut avcc_start_code: [u8; 4] = [0; 4];
+        let mut file = File::open("output.h264").await?;
 
-        let _ = file.read_exact(&mut avcc_start_code).await?;
+        loop {
+            let mut avcc_start_code: [u8; 4] = [0; 4];
 
-        let nal_unit_length = u32::from_be_bytes(avcc_start_code) as usize;
+            if file.read_exact(&mut avcc_start_code).await.is_err() {
+                break;
+            }
 
-        let mut buffer = vec![0; nal_unit_length];
-        let bytes_read = file.read_buf(&mut buffer).await?;
+            let nal_unit_length = u32::from_be_bytes(avcc_start_code) as usize;
 
-        if bytes_read == 0 {
-            return Ok(());
+            let mut buffer = vec![0; nal_unit_length];
+            let bytes_read = file.read_buf(&mut buffer).await?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            let elapsed = (clock.elapsed().as_secs() * 90_000) as u32;
+
+            tx.send((Bytes::copy_from_slice(&buffer[..bytes_read]), elapsed))
+                .await?;
+
+            tokio::time::sleep(Duration::from_secs_f32(1.0 / 30.0)).await;
         }
-
-        let elapsed = (clock.elapsed().as_secs() * 90_000) as u32;
-
-        tx.send((Bytes::copy_from_slice(&buffer[..bytes_read]), elapsed))
-            .await?;
-
-        tokio::time::sleep(Duration::from_secs_f32(1.0 / 30.0)).await;
     }
 }
 
@@ -117,4 +120,30 @@ fn start_send_tasks(
         };
         token.cancel();
     });
+}
+
+async fn connect(endpoint: &Endpoint, remote_id: &str, connection_manager: &Arc<RtpConnectionManager>) -> anyhow::Result<Vec<String>>{
+    let remote_endpoint = PublicKey::from_str(&remote_id)?;
+
+    let conn = endpoint.connect(remote_endpoint, ALPN).await?;
+
+    let (mut send, mut recv) = conn.open_bi().await?;
+
+    let request = connection_manager.session_info();
+    let request_bytes = serde_json::to_vec(&request)?;
+
+    send.write_all(&request_bytes)
+        .await?;
+    send.finish()?;
+
+    let bytes = recv
+        .read_to_end(1000)
+        .await?;
+
+    let response: SessionInfo =
+        serde_json::from_slice(&bytes)?;
+    
+    connection_manager.add_connection(conn);
+
+    Ok(response.peers)
 }

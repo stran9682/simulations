@@ -162,6 +162,13 @@ impl Peer {
             // misordered packet.
         }
     }
+
+    pub fn update_last_sr_timestamp(&mut self, last_sr_timestamp: u32) {
+        self.last_sr_timestamp = last_sr_timestamp;
+        self.delay_since_last_sr = Some(Instant::now());
+        self.expected_prior = self.expected_num_packets();
+        self.received_prior = self.packets_received
+    }
 }
 
 pub async fn packet_receiver(

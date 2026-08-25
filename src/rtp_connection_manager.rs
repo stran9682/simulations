@@ -12,17 +12,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::rtp::{
+use crate::{rtcp::{rtcp_packet_header::{self, RTCPHeader}, sender_report::SenderReport}, rtp::{
     rtp_packet_header::{RTPHeader, RTPSession},
     rtp_receiver::{Peer, packet_receiver},
     rtp_sender::PacketType,
-};
+}};
 
 #[derive(Deserialize, Serialize, Debug)]
-struct SessionInfo {
-    peers: Vec<String>,
-    video_ssrc: u32,
-    audio_ssrc: u32,
+pub struct SessionInfo {
+    pub peers: Vec<String>,
+    pub video_ssrc: u32,
+    pub audio_ssrc: u32,
 }
 
 #[derive(Debug)]
@@ -71,7 +71,7 @@ impl RtpConnectionManager {
         connections
     }
 
-    fn session_info(&self) -> SessionInfo {
+    pub fn session_info(&self) -> SessionInfo {
         let peers: Vec<String> = self
             .connections
             .iter()
@@ -102,6 +102,11 @@ impl RtpConnectionManager {
                     .get_packet(marker, timestamp, packet_length)
             }
         }
+    }
+
+    pub fn add_connection(&self, connection: Connection) {
+        self.connections
+            .insert(connection.remote_id(), connection.clone());
     }
 }
 
@@ -160,7 +165,26 @@ impl ProtocolHandler for RtpConnectionManager {
             };
 
             if packet[1] & 0x7F >= 72 {
-                todo!()
+                while !packet.is_empty() {
+                    let header = RTCPHeader::deserialize(&mut packet);
+
+                    if header.packet_type == rtcp_packet_header::PacketType::SenderReport {
+                        let sender_report = SenderReport::deserialize(&mut packet, header.count);
+
+                    let last_sr_timestamp = (sender_report.ntp_time >> 16 & 0xFFFFFFFF) as u32;
+
+                    let peer = if sender_report.ssrc == self.video_ssrc {
+                        video_peer.lock()
+                    } else {
+                        audio_peer.lock()
+                    };
+
+                    if let Ok(mut peer) = peer {
+                        peer.update_last_sr_timestamp(last_sr_timestamp);
+                    }                   
+                }
+            }
+
             } else {
                 let header = RTPHeader::deserialize(&mut packet);
 
