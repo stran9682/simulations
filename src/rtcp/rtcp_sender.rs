@@ -1,5 +1,5 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -7,16 +7,25 @@ use bytes::{BufMut, BytesMut};
 use iroh::endpoint::Connection;
 use rand::RngExt;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
-use crate::{rtcp::{reception_report::ReceptionReport, rtcp_packet_header::{PacketType, RTCPHeader}, sender_report::SenderReport}, rtp::{rtp_packet_header::RTPSession, rtp_receiver::Peer}};
+use crate::{
+    rtcp::{
+        rtcp_packet_header::{PacketType, RTCPHeader},
+        sender_report::SenderReport,
+    },
+    rtp::{rtp_packet_header::RTPSession, rtp_receiver::Peer},
+};
 
-async fn _rtcp_sender(
-    connection: Connection, 
-    rtp_session: Arc<RTPSession>, 
-    clock: Instant, 
+pub async fn rtcp_sender(
+    connection: Connection,
+    rtp_session: Arc<RTPSession>,
+    clock: Instant,
     clock_rate: u64,
-    peer: Peer
+    peer: Arc<Mutex<Peer>>,
 ) {
+
+    todo!("make this cancelable");
     let mut first_packet = true;
 
     loop {
@@ -45,25 +54,12 @@ async fn _rtcp_sender(
         let sender_report = SenderReport {
             ssrc: rtp_session.ssrc,
             ntp_time: ntp,
-            rtp_time:  (clock.elapsed().as_secs() * clock_rate) as u32 ,
+            rtp_time: (clock.elapsed().as_secs() * clock_rate) as u32,
             packet_count: rtp_session.get_num_packets_generated(),
             octet_count: rtp_session.get_num_octets_sent(),
-            reports: vec![ReceptionReport {
-                reportee_ssrc: peer.ssrc,
-                fraction_lost: peer.calculate_fraction_lost(),
-                total_lost: peer.expected_num_packets() - peer.packets_received,
-                extended_sequence_number: peer.max_extended_sequence_num(),
-                jitter: peer.jitter,
-                last_sr_timestamp: peer.last_sr_timestamp,
-                delay_since_last_sr: match peer.delay_since_last_sr {
-                    None => 0,
-                    Some(time) => {
-                        let elapsed = time.elapsed();
-                        let seconds = elapsed.as_secs();
-                        (seconds * 65536) as u32
-                    }
-                },
-            }],
+            reports: peer
+                .lock()
+                .map_or_else(|_| vec![], |p| vec![p.reception_report()]),
         };
 
         let header = RTCPHeader {

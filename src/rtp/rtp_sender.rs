@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use iroh::endpoint::Connection;
 use tokio::sync::mpsc::Receiver;
 
 use crate::rtp_connection_manager::RtpConnectionManager;
@@ -26,7 +25,22 @@ pub async fn send_packets(
 
         let payloads = match packet_type {
             PacketType::Video => split_payload(&bytes, &connection_manager, timestamp),
-            PacketType::Audio => vec![bytes],
+            PacketType::Audio => {
+                let mut buf = BytesMut::with_capacity(1500);
+
+                let rtp_header = connection_manager.get_packet_header(
+                    true,
+                    timestamp,
+                    bytes.len() as u32,
+                    PacketType::Audio,
+                );
+
+                rtp_header.serialize(&mut buf);
+
+                buf.extend_from_slice(&bytes);
+
+                vec![buf.freeze()]
+            }
         };
 
         for payload in payloads {
@@ -40,15 +54,6 @@ pub async fn send_packets(
             }
         }
     }
-}
-
-pub async fn send_audio(
-    bytes: &Bytes,
-    connections: &Vec<Connection>,
-    rtp_session: &RtpConnectionManager,
-    timestamp: u32,
-) {
-    todo!()
 }
 
 fn split_payload(

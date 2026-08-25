@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = Endpoint::bind(presets::N0).await?;
     endpoint.online().await;
 
-    println!("endpoint: {}", endpoint.id().to_string());
+    println!("endpoint: {}", endpoint.id());
 
     let connection_manager = Arc::new(RtpConnectionManager::new());
 
@@ -93,7 +93,61 @@ async fn generate_video_frame(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyho
 }
 
 async fn generate_audio_sample(tx: Sender<(Bytes, u32)>, clock: Instant) -> anyhow::Result<()> {
-    todo!();
+    loop {
+        let mut file = File::open("output.opus").await?;
+        let mut opus_data = Vec::new();
+        file.read_to_end(&mut opus_data).await?;
+
+        let packets = parse_ogg_opus_packets(&opus_data)?;
+
+        for packet in packets {
+            let elapsed = (clock.elapsed().as_secs() * 48_000) as u32;
+
+            tx.send((Bytes::copy_from_slice(&packet), elapsed)).await?;
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+fn parse_ogg_opus_packets(file: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+    let mut offset = 0;
+    let mut packets = Vec::new();
+
+    while offset + 27 < file.len() {
+        if &file[offset..offset + 4] != b"OggS" {
+            break;
+        }
+
+        let page_segments = file[offset + 26] as usize;
+        let segment_table_start = offset + 27;
+        let segment_table_end = segment_table_start + page_segments;
+
+        if segment_table_end > file.len() {
+            break;
+        }
+
+        let mut packet_start = segment_table_end;
+        for segment_size in &file[segment_table_start..segment_table_end] {
+            let size = *segment_size as usize;
+            let packet_end = packet_start + size;
+
+            if packet_end > file.len() {
+                break;
+            }
+
+            let packet = &file[packet_start..packet_end];
+            if !packet.starts_with(b"OpusHead") && !packet.starts_with(b"OpusTags") {
+                packets.push(packet.to_vec());
+            }
+
+            packet_start = packet_end;
+        }
+
+        offset = packet_start;
+    }
+
+    Ok(packets)
 }
 
 fn start_send_tasks(
@@ -122,8 +176,12 @@ fn start_send_tasks(
     });
 }
 
-async fn connect(endpoint: &Endpoint, remote_id: &str, connection_manager: &Arc<RtpConnectionManager>) -> anyhow::Result<Vec<String>>{
-    let remote_endpoint = PublicKey::from_str(&remote_id)?;
+async fn connect(
+    endpoint: &Endpoint,
+    remote_id: &str,
+    connection_manager: &Arc<RtpConnectionManager>,
+) -> anyhow::Result<Vec<String>> {
+    let remote_endpoint = PublicKey::from_str(remote_id)?;
 
     let conn = endpoint.connect(remote_endpoint, ALPN).await?;
 
@@ -132,17 +190,13 @@ async fn connect(endpoint: &Endpoint, remote_id: &str, connection_manager: &Arc<
     let request = connection_manager.session_info();
     let request_bytes = serde_json::to_vec(&request)?;
 
-    send.write_all(&request_bytes)
-        .await?;
+    send.write_all(&request_bytes).await?;
     send.finish()?;
 
-    let bytes = recv
-        .read_to_end(1000)
-        .await?;
+    let bytes = recv.read_to_end(1000).await?;
 
-    let response: SessionInfo =
-        serde_json::from_slice(&bytes)?;
-    
+    let response: SessionInfo = serde_json::from_slice(&bytes)?;
+
     connection_manager.add_connection(conn);
 
     Ok(response.peers)

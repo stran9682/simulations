@@ -1,4 +1,7 @@
-use crate::rtp::{rtp_packet_header::RTPHeader, rtp_sender::PacketType};
+use crate::{
+    rtcp::reception_report::ReceptionReport,
+    rtp::{rtp_packet_header::RTPHeader, rtp_sender::PacketType},
+};
 use bytes::Bytes;
 use std::{
     collections::VecDeque,
@@ -36,8 +39,7 @@ impl Fragment {
 
 #[derive(Debug)]
 pub struct Peer {
-
-    pub ssrc: u32, 
+    pub ssrc: u32,
 
     ///  variance in arrival time
     pub jitter: u32,
@@ -168,6 +170,25 @@ impl Peer {
         self.delay_since_last_sr = Some(Instant::now());
         self.expected_prior = self.expected_num_packets();
         self.received_prior = self.packets_received
+    }
+
+    pub fn reception_report(&self) -> ReceptionReport {
+        ReceptionReport {
+            reportee_ssrc: self.ssrc,
+            fraction_lost: self.calculate_fraction_lost(),
+            total_lost: self.expected_num_packets() - self.packets_received,
+            extended_sequence_number: self.max_extended_sequence_num(),
+            jitter: self.jitter,
+            last_sr_timestamp: self.last_sr_timestamp,
+            delay_since_last_sr: match self.delay_since_last_sr {
+                None => 0,
+                Some(time) => {
+                    let elapsed = time.elapsed();
+                    let seconds = elapsed.as_secs();
+                    (seconds * 65536) as u32
+                }
+            },
+        }
     }
 }
 
