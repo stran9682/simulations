@@ -150,7 +150,7 @@ impl Peer {
             self.max_sequence_number = header.sequence_number;
         }
 
-        let delta = header.sequence_number - self.max_sequence_number;
+        let delta = header.sequence_number.wrapping_sub(self.max_sequence_number);
 
         if delta < 3000 {
             // accounting for wraparound
@@ -176,7 +176,7 @@ impl Peer {
         ReceptionReport {
             reportee_ssrc: self.ssrc,
             fraction_lost: self.calculate_fraction_lost(),
-            total_lost: self.expected_num_packets() - self.packets_received,
+            total_lost: self.expected_num_packets().wrapping_sub(self.packets_received),
             extended_sequence_number: self.max_extended_sequence_num(),
             jitter: self.jitter,
             last_sr_timestamp: self.last_sr_timestamp,
@@ -210,12 +210,24 @@ pub async fn packet_receiver(
             _ = cancellation_token.cancelled() => {
                 return
             }
-            Some((header, _)) = rx.recv() => {
-                let arrival_time = instant.elapsed();
-                let arrival_time = arrival_time.as_millis() as u32 * (media_clock_rate / 1000);
-                let difference = arrival_time.wrapping_sub(header.timestamp);
+            result = rx.recv() => {
+                match result {
+                    Some((header, bytes)) => {
+                        let arrival_time = instant.elapsed();
+                        let arrival_time = arrival_time.as_millis() as u32 * (media_clock_rate / 1000);
+                        let difference = arrival_time.wrapping_sub(header.timestamp);
 
-                peer_data.lock().unwrap().update_reception_stats(difference, header);
+                        match peer_data.lock() {
+                            Ok(mut peer) => { peer.update_reception_stats(difference, header); },
+                            Err(e) => { 
+                                //eprintln!("RTP receiver lock failure: {e}") 
+                            }
+                        }
+                    }
+                    None => {
+                        println!("Channel Closed")
+                    }
+                }
             }
         }
     }

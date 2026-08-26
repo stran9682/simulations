@@ -114,31 +114,8 @@ impl RtpConnectionManager {
         self.connections
             .insert(connection.remote_id(), connection.clone());
     }
-}
 
-impl ProtocolHandler for RtpConnectionManager {
-    async fn accept(&self, connection: Connection) -> Result<(), iroh::protocol::AcceptError> {
-        let (mut send, mut recv) = connection.accept_bi().await?;
-
-        let bytes = recv
-            .read_to_end(1000)
-            .await
-            .map_err(|e| AcceptError::from_err(e))?;
-
-        let request: SessionInfo =
-            serde_json::from_slice(&bytes).map_err(|e| AcceptError::from_err(e))?;
-
-        self.connections
-            .insert(connection.remote_id(), connection.clone());
-
-        let response = self.session_info();
-        let response = serde_json::to_vec(&response).map_err(|e| AcceptError::from_err(e))?;
-
-        send.write_all(&response)
-            .await
-            .map_err(|e| AcceptError::from_err(e))?;
-        send.finish()?;
-
+    pub async fn spawn_receivers(&self, connection: Connection, request: &SessionInfo) {
         let recv_tasks = TaskTracker::new();
         let (audio_tx, audio_rx) = mpsc::channel::<(RTPHeader, Bytes)>(200);
         let (frame_tx, frame_rx) = mpsc::channel::<(RTPHeader, Bytes)>(200);
@@ -157,6 +134,7 @@ impl ProtocolHandler for RtpConnectionManager {
             self.clock,
             48_000,
             Arc::clone(&audio_peer),
+            token.child_token()
         ));
 
         let video_peer = Arc::new(Mutex::new(Peer::new(request.video_ssrc)));
@@ -172,16 +150,14 @@ impl ProtocolHandler for RtpConnectionManager {
             self.clock,
             90_000,
             Arc::clone(&video_peer),
+            token.child_token()
         ));
-
-        
 
         loop {
             let mut packet = match connection.read_datagram().await {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("Connection Error: {e}");
-                    token.cancel();
                     break;
                 }
             };
@@ -201,8 +177,9 @@ impl ProtocolHandler for RtpConnectionManager {
                             audio_peer.lock()
                         };
 
-                        if let Ok(mut peer) = peer {
-                            peer.update_last_sr_timestamp(last_sr_timestamp);
+                        match peer {
+                            Ok(mut peer) => { peer.update_last_sr_timestamp(last_sr_timestamp); },
+                            Err(e) => { eprintln!("RTCP Lock failure: {}",  e)}
                         }
                     }
                 }
@@ -218,13 +195,42 @@ impl ProtocolHandler for RtpConnectionManager {
                 let _ = tx
                     .send((header, packet))
                     .await
-                    .inspect_err(|e| eprintln!("RTP receiver was full: {e}"));
+                    .inspect_err(|e| eprintln!("RTP receiver failure: {}", e));
             }
         }
+
+        token.cancel();
 
         self.connections.remove(&connection.remote_id());
 
         recv_tasks.wait().await;
+    }
+}
+
+impl ProtocolHandler for RtpConnectionManager {
+    async fn accept(&self, connection: Connection) -> Result<(), iroh::protocol::AcceptError> {
+        let (mut send, mut recv) = connection.accept_bi().await?;
+
+        let bytes = recv
+            .read_to_end(1000)
+            .await
+            .map_err(|e| AcceptError::from_err(e))?;
+
+        let request: SessionInfo =
+            serde_json::from_slice(&bytes).map_err(|e| AcceptError::from_err(e))?;
+
+        let response = self.session_info();
+        let response = serde_json::to_vec(&response).map_err(|e| AcceptError::from_err(e))?;
+
+        send.write_all(&response)
+            .await
+            .map_err(|e| AcceptError::from_err(e))?;
+        send.finish()?;
+
+        self.connections
+            .insert(connection.remote_id(), connection.clone());
+
+        self.spawn_receivers(connection, &request).await;
 
         Ok(())
     }

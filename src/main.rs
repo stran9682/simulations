@@ -197,7 +197,9 @@ async fn connect(
 
     let response: SessionInfo = serde_json::from_slice(&bytes)?;
 
-    connection_manager.add_connection(conn);
+    connection_manager.add_connection(conn.clone());
+
+    connection_manager.spawn_receivers(conn, &response).await;
 
     Ok(response.peers)
 }
