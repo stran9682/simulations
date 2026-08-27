@@ -7,7 +7,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use iroh::{
     PublicKey,
-    endpoint::Connection,
+    endpoint::{Connection, PathId},
     protocol::{AcceptError, ProtocolHandler},
 };
 use rand::Rng;
@@ -134,7 +134,7 @@ impl RtpConnectionManager {
             self.clock,
             48_000,
             Arc::clone(&audio_peer),
-            token.child_token()
+            token.child_token(),
         ));
 
         let video_peer = Arc::new(Mutex::new(Peer::new(request.video_ssrc)));
@@ -150,10 +150,10 @@ impl RtpConnectionManager {
             self.clock,
             90_000,
             Arc::clone(&video_peer),
-            token.child_token()
+            token.child_token(),
         ));
 
-        loop {
+        'receive: loop {
             let mut packet = match connection.read_datagram().await {
                 Ok(data) => data,
                 Err(e) => {
@@ -163,6 +163,11 @@ impl RtpConnectionManager {
             };
 
             if packet[1] & 0x7F >= 72 {
+                if let Some(rtt) = connection.rtt(PathId::ZERO) {
+                    println!("{} RTT: {}", connection.remote_id(), rtt.as_micros());
+                    todo!("Record RTT in a file")
+                }
+
                 while !packet.is_empty() {
                     let header = RTCPHeader::deserialize(&mut packet);
 
@@ -178,8 +183,13 @@ impl RtpConnectionManager {
                         };
 
                         match peer {
-                            Ok(mut peer) => { peer.update_last_sr_timestamp(last_sr_timestamp); },
-                            Err(e) => { eprintln!("RTCP Lock failure: {}",  e)}
+                            Ok(mut peer) => {
+                                peer.update_last_sr_timestamp(last_sr_timestamp);
+                            }
+                            Err(e) => {
+                                eprintln!("RTCP Lock failure: {}", e);
+                                break 'receive;
+                            }
                         }
                     }
                 }
@@ -192,10 +202,10 @@ impl RtpConnectionManager {
                     &frame_tx
                 };
 
-                let _ = tx
-                    .send((header, packet))
-                    .await
-                    .inspect_err(|e| eprintln!("RTP receiver failure: {}", e));
+                if let Err(e) = tx.send((header, packet)).await {
+                    eprintln!("RTP receiver failure: {}", e);
+                    break;
+                }
             }
         }
 

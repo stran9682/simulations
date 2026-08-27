@@ -23,7 +23,7 @@ pub async fn rtcp_sender(
     clock: Instant,
     clock_rate: u64,
     peer: Arc<Mutex<Peer>>,
-    cancellation_token: CancellationToken
+    cancellation_token: CancellationToken,
 ) {
     let mut first_packet = true;
 
