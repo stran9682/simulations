@@ -163,9 +163,17 @@ impl RtpConnectionManager {
             };
 
             if packet[1] & 0x7F >= 72 {
-                if let Some(rtt) = connection.rtt(PathId::ZERO) {
-                    println!("{} RTT: {}", connection.remote_id(), rtt.as_micros());
-                    todo!("Record RTT in a file")
+                for path in &connection.paths() {
+                    if let Some(rtt) = connection.rtt(path.id()) {
+                        // println!("{} RTT: {}", connection.remote_id(), rtt.as_micros());
+                        println!(
+                            "path: {} \t is relay: {} \t is selected {} \t rtt: {}",
+                            path.id(),
+                            path.is_selected(),
+                            path.is_relay(),
+                            rtt.as_micros()
+                        );
+                    }
                 }
 
                 while !packet.is_empty() {
