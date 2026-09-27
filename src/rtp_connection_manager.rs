@@ -169,8 +169,8 @@ impl RtpConnectionManager {
                         println!(
                             "path: {} \t is relay: {} \t is selected {} \t rtt: {}",
                             path.id(),
-                            path.is_selected(),
                             path.is_relay(),
+                            path.is_selected(),
                             rtt.as_micros()
                         );
                     }
